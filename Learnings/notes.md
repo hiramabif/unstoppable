@@ -12,12 +12,14 @@ The ERC-4626 standard defines a unified API for yield-bearing vaults. Before thi
 
 Under the hood, an ERC-4626 vault manages two primary layers:
 
-1. **The Underlying Asset ($A$):** The base ERC-20 token deposited into the vault (e.g., DAI, WETH, USDC).
-2. **The Vault Shares ($S$):** The vault's own ERC-20 tokens minted to depositors, representing their fractional ownership of the underlying assets.
+1. **The Underlying Asset (A):** The base ERC-20 token deposited into the vault (e.g., DAI, WETH, USDC).
+2. **The Vault Shares (S):** The vault's own ERC-20 tokens minted to depositors, representing their fractional ownership of the underlying assets.
 
 As the vault earns yield, the amount of underlying assets increases, but the number of outstanding shares remains the same. Thus, the exchange rate of shares to assets grows over time:
 
-$$\text{Share Price} = \frac{\text{Total Assets in Vault}}{\text{Total Supply of Shares}}$$
+```text
+Share Price = Total Assets in Vault / Total Supply of Shares
+```
 
 ### Core API Flow
 
@@ -60,30 +62,40 @@ Let's analyze why this equation is extremely fragile:
 
 2. **`convertToShares(totalSupply)` represents internal accounting:**
    Solmate's implementation of `convertToShares` calculates:
-   $$\text{Shares} = \frac{\text{Assets} \times \text{totalSupply}}{\text{totalAssets()}}$$
+   ```text
+   Shares = (Assets * totalSupply) / totalAssets()
+   ```
    When the input asset amount is passed as `totalSupply` (a type/unit mismatch, as it passes shares instead of assets), the equation simplifies to:
-   $$\text{Shares} = \frac{\text{totalSupply} \times \text{totalSupply}}{\text{totalAssets()}}$$
+   ```text
+   Shares = (totalSupply * totalSupply) / totalAssets()
+   ```
    Under normal conditions, where the vault has never received direct donations and only accepts tokens via `deposit()`, the physical balance of tokens (`totalAssets()`) is exactly equal to `totalSupply`.
 
    If `totalAssets() == totalSupply`, then:
-   $$\text{Shares} = \frac{\text{totalSupply} \times \text{totalSupply}}{\text{totalSupply}} = \text{totalSupply}$$
+   ```text
+   Shares = (totalSupply * totalSupply) / totalSupply = totalSupply
+   ```
    And `balanceBefore` is `totalAssets() = totalSupply`.
 
    Therefore, the check passes: `totalSupply == totalSupply`.
 
 3. **The Silent Killer: Direct Token Donation**
-   If an external attacker bypasses the formal `deposit()` mechanism and transfers even **$1$ wei** of the underlying asset directly to the vault using a raw `transfer` call, the physical token balance (`totalAssets()`) increases, but the `totalSupply` of shares remains completely unchanged.
+   If an external attacker bypasses the formal `deposit()` mechanism and transfers even **1 wei** of the underlying asset directly to the vault using a raw `transfer` call, the physical token balance (`totalAssets()`) increases, but the `totalSupply` of shares remains completely unchanged.
 
-   Let's do the math if $1$ wei is donated:
+   Let's do the math if 1 wei is donated:
    - `totalAssets() = totalSupply + 1`
    - `balanceBefore = totalSupply + 1`
    - Now, calculate `convertToShares(totalSupply)`:
-     $$\text{Shares} = \frac{\text{totalSupply} \times \text{totalSupply}}{\text{totalSupply} + 1}$$
+     ```text
+     Shares = (totalSupply * totalSupply) / (totalSupply + 1)
+     ```
      Because of Solidity's integer division, this calculation rounds down to **strictly less than `totalSupply`** (specifically, `totalSupply - 1` when `totalSupply` is large).
 
    Now, evaluating the invariant check:
-   $$\text{convertToShares(totalSupply)} \neq \text{balanceBefore}$$
-   $$\text{totalSupply} - 1 \neq \text{totalSupply} + 1$$
+   ```text
+   convertToShares(totalSupply) != balanceBefore
+   (totalSupply - 1) != (totalSupply + 1)
+   ```
 
    The equation fails, the transaction reverts, and the flashloan functionality is completely bricked forever.
 
@@ -126,7 +138,7 @@ Therefore: **Yes! I can unilaterally inflate the Right Side (`balanceBefore`) by
 
 ### Step 4: Assessing Irreversibility (The Permanent Brick)
 
-A good exploit shouldn't be easy to recover from. Once I donate the $1$ wei and break the equation, can the owner or a user fix it?
+A good exploit shouldn't be easy to recover from. Once I donate the 1 wei and break the equation, can the owner or a user fix it?
 
 - To restore the balance equation, the Left Side would need to increase (by minting more shares without increasing assets—impossible) OR the Right Side would need to decrease (by withdrawing or transferring out the donated assets).
 - In `UnstoppableVault`, there are no functions to withdraw assets without burning shares, nor is there a "sweep" function for undocumented tokens.
@@ -156,10 +168,10 @@ If your contract needs to track exactly how much it expects to hold, use an inte
 
 ### Rule 3: Guard Against the First Deposit Bug (Inflation Attack)
 
-When `totalSupply == 0`, an attacker can manipulate the exchange rate by depositing $1$ wei, and donating $10,000$ tokens to steal subsequent depositors' funds.
+When `totalSupply == 0`, an attacker can manipulate the exchange rate by depositing 1 wei, and donating 10,000 tokens to steal subsequent depositors' funds.
 
 - To fix this, mint **virtual shares and assets** (a small offset in the calculation, like OpenZeppelin's ERC-4626 virtual offsets) to ensure the division never rounds down to zero.
-- Alternatively, burn/lock a small amount of the very first minted shares (e.g., $10^3$ or $10^9$ wei of shares) to a dead address (`address(0)`) so the exchange rate can never be radically skewed.
+- Alternatively, burn/lock a small amount of the very first minted shares (e.g., 1,000 or 1,000,000,000 wei of shares) to a dead address (`address(0)`) so the exchange rate can never be radically skewed.
 
 ---
 
@@ -185,7 +197,7 @@ However, **`delegatecall` in the context of the vault means the caller can execu
 
 ### 2. The Dangerous Fallback Loop
 
-When we brick the vault's flashloans using our $1$ wei donation exploit, how does the protocol react?
+When we brick the vault's flashloans using our 1 wei donation exploit, how does the protocol react?
 
 1. The **`UnstoppableMonitor`** contract detects the flashloan failure.
 2. It automatically calls `vault.setPause(true)`.
@@ -193,25 +205,25 @@ When we brick the vault's flashloans using our $1$ wei donation exploit, how doe
 
 Here, the ownership is transferred back to the safe `deployer` address. But in a slightly different architecture—for instance, if the monitor's ownership logic had a privilege escalation vulnerability, or if the `transferOwnership` function lacked strict access controls—an attacker could hijack the ownership during this fallback state.
 
-**Once an attacker gains ownership of the vault, the vault is immediately dead.** The attacker simply calls `execute()` with a malicious `delegatecall` payload, approving their own address to transfer out all $1,000,000$ DVT tokens, resulting in a total asset drain.
+**Once an attacker gains ownership of the vault, the vault is immediately dead.** The attacker simply calls `execute()` with a malicious `delegatecall` payload, approving their own address to transfer out all 1,000,000 DVT tokens, resulting in a total asset drain.
 
 ### 3. Real-World Lessons: The Danger of Cascading State Shifts
 
 In smart contract security, we frequently see seemingly "harmless" bugs (like DoS or rounding errors) acting as the keys that unlock catastrophic exploits.
 
-#### Anecdote A: The Parity Multi-Sig Hack (2017) — $150M Frozen
+#### Anecdote A: The Parity Multi-Sig Hack (2017) — 150M Frozen
 
-- **The Vulnerability:** The Parity multi-sig library contract had an uninitialized owner state.
-- **The Trigger:** A user called `initWallet()` on the library contract, successfully claiming ownership of it.
-- **The Cascade:** In a panic or out of malice, the new "owner" called the `kill()` function, which triggered `selfdestruct`.
-- **The Ruin:** Because all Parity multi-sig wallets on-chain relied on this library's code via `delegatecall`, destroying the library instantly froze over $150,000,000$ worth of Ether forever. A simple lack of initialization access control led to permanent system death.
+- The Vulnerability: The Parity multi-sig library contract had an uninitialized owner state.
+- The Trigger: A user called `initWallet()` on the library contract, successfully claiming ownership of it.
+- The Cascade: In a panic or out of malice, the new "owner" called the `kill()` function, which triggered `selfdestruct`.
+- The Ruin: Because all Parity multi-sig wallets on-chain relied on this library's code via `delegatecall`, destroying the library instantly froze over 150,000,000 worth of Ether forever. A simple lack of initialization access control led to permanent system death.
 
-#### Anecdote B: The Euler Finance Donation Attack (2023) — $197M Stolen
+#### Anecdote B: The Euler Finance Donation Attack (2023) — 197M Stolen
 
-- **The Vulnerability:** Euler allowed users to directly "donate" their eTokens (collateral) to the reserve pool.
-- **The Exploit:** An attacker minted a massive amount of collateral and debt, and then called `donateToReserves()`.
-- **The Cascade:** By intentionally donating their collateral, their health score fell below $1$ (liquidation threshold), but they still held the un-liquidated debt.
-- **The Ruin:** This undercollateralized state allowed them to liquidate themselves using a secondary account at a massive discount, draining $197,000,000$ from the protocol. This is a direct real-life example of using **deliberate token donation** to break accounting invariants.
+- The Vulnerability: Euler allowed users to directly "donate" their eTokens (collateral) to the reserve pool.
+- The Exploit: An attacker minted a massive amount of collateral and debt, and then called `donateToReserves()`.
+- The Cascade: By intentionally donating their collateral, their health score fell below 1 (liquidation threshold), but they still held the un-liquidated debt.
+- The Ruin: This undercollateralized state allowed them to liquidate themselves using a secondary account at a massive discount, draining 197,000,000 from the protocol. This is a direct real-life example of using **deliberate token donation** to break accounting invariants.
 
 ---
 

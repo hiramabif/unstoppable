@@ -58,29 +58,37 @@ Let's dissect the components of this condition:
 
 2. **`convertToShares(totalSupply)` represents internal accounting:**
    Solmate's implementation of `convertToShares()` is calculated as:
-   $$\text{Shares} = \frac{\text{Assets} \times \text{totalSupply}}{\text{totalAssets()}}$$
-   However, passing `totalSupply` (which is in shares) as the asset input introduces a type/unit mismatch. Under normal deposit conditions, the physical token balance (`totalAssets()`) is exactly equal to the total minted shares (`totalSupply`).
+   ```text
+   Shares = (Assets * totalSupply) / totalAssets()
+   ```
+   However, passing `totalSupply` (which is in shares) as the asset input introduces a type/unit mismatch. Under normal deposit conditions, the physical token balance (`totalAssets()`) is exactly equal to the total minted shares (`totalSupply`). 
    If `totalAssets() == totalSupply`, then:
-   $$\text{Shares} = \frac{\text{totalSupply} \times \text{totalSupply}}{\text{totalSupply}} = \text{totalSupply}$$
+   ```text
+   Shares = (totalSupply * totalSupply) / totalSupply = totalSupply
+   ```
    And `balanceBefore` is `totalAssets() = totalSupply`.
    Consequently, the invariant check simplifies to `totalSupply == totalSupply`, which evaluates to `true`, and the flash loan proceeds.
 
 3. **Exploit: Direct Token Donation**
    Because ERC-20 tokens are external ledger systems, the vault contract has no control over direct transfers sent via `token.transfer()`. Anyone can transfer tokens directly to the vault, bypassing the formal `deposit()` mechanism.
-
-   If we donate even **$1$ wei** of DVT to the vault:
-   - The physical token balance increases: `totalAssets() = totalSupply + 1`
-   - The expected balance becomes: `balanceBefore = totalSupply + 1`
-   - However, `totalSupply` (shares) remains completely unchanged.
-
+   
+   If we donate even **1 wei** of DVT to the vault:
+   * The physical token balance increases: `totalAssets() = totalSupply + 1`
+   * The expected balance becomes: `balanceBefore = totalSupply + 1`
+   * However, `totalSupply` (shares) remains completely unchanged.
+   
    Let's recalculate the internal conversion:
-   $$\text{Shares} = \frac{\text{totalSupply} \times \text{totalSupply}}{\text{totalSupply} + 1}$$
+   ```text
+   Shares = (totalSupply * totalSupply) / (totalSupply + 1)
+   ```
    Due to Solidity's integer division, this division rounds down, evaluating to `totalSupply - 1`.
-
+   
    Comparing the two sides of the invariant check:
-   $$\text{convertToShares(totalSupply)} \neq \text{balanceBefore}$$
-   $$\text{totalSupply} - 1 \neq \text{totalSupply} + 1$$
-
+   ```text
+   convertToShares(totalSupply) != balanceBefore
+   (totalSupply - 1) != (totalSupply + 1)
+   ```
+   
    This inequality causes the transaction to revert with `InvalidBalance()`. The flash loan feature is permanently bricked.
 
 ---
